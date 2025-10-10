@@ -13,37 +13,23 @@ import altair as alt
 @dataclass
 class SalaryCurve:
     name: str
-    annual_growth_pct: float  # crescimento anual nominal base (ex.: 0.05 para 5%)
-
+    annual_growth_pct: float
 
 DEFAULT_CURVES = {
-    "Ruim": SalaryCurve("Ruim", 0.02),
+    "Ruim":  SalaryCurve("Ruim", 0.02),
     "Médio": SalaryCurve("Médio", 0.05),
-    "Bom": SalaryCurve("Bom", 0.08),
+    "Bom":   SalaryCurve("Bom", 0.08),
 }
 
-# Placeholders anuais do Ibovespa — apenas para seed/edição manual
 DEFAULT_IBOV_LAST10 = [-0.1331, 0.3894, 0.2686, 0.1503, 0.3158, -0.1009, -0.1193, 0.0469, 0.2228, 0.1200]
 
-
-# =============================
-# Funções base
-# =============================
-
 def annual_to_monthly_rate(annual_rate: float) -> float:
-    """Converte taxa efetiva anual -> efetiva mensal."""
     return (1 + annual_rate) ** (1 / 12) - 1
-
 
 def monthly_to_annual_rate(monthly_rate: float) -> float:
     return (1 + monthly_rate) ** 12 - 1
 
-
 def expand_annual_to_monthly_series(annual_returns: List[float], years_each: int = 1, noise: float = 0.0, seed: Optional[int] = None) -> List[float]:
-    """
-    Gera série mensal a partir de anuais. Opcionalmente injeta ruído leve (evita determinismo).
-    noise = desvio-padrão extra (mensal) aditivo em retorno simples.
-    """
     rng = np.random.default_rng(seed)
     monthly = []
     for r in annual_returns:
@@ -54,76 +40,48 @@ def expand_annual_to_monthly_series(annual_returns: List[float], years_each: int
         monthly.extend(base.tolist())
     return monthly
 
-
 def compute_salary_path_decay(base_salary: float, months: int, annual_growth_initial: float, half_life_years: float, annual_growth_floor: float) -> np.ndarray:
-    """
-    Curva salarial com crescimento que decai ao longo do tempo:
-    growth_annual(t) = floor + (initial - floor) * exp(-ln(2) * t_months / half_life_months)
-    O salário evolui multiplicativamente mês a mês com growth_mensal(t) = (1 + growth_annual(t))**(1/12) - 1.
-    """
     t = np.arange(months, dtype=float)
     half_life_m = max(1.0, half_life_years * 12.0)
-    # crescimento anual em cada mês (efetivo)
     g_a_t = annual_growth_floor + (annual_growth_initial - annual_growth_floor) * np.exp(-np.log(2) * t / half_life_m)
     g_m_t = (1.0 + g_a_t) ** (1.0 / 12.0) - 1.0
-    # salário: PG com taxa variável mensal
     salary = np.empty(months, dtype=float)
     salary[0] = base_salary
     for i in range(1, months):
         salary[i] = salary[i - 1] * (1.0 + g_m_t[i - 1])
     return salary
 
-
 def robust_monthly_returns_from_csv(df: pd.DataFrame) -> List[float]:
-    """
-    Aceita CSV diário ou mensal; retorna LISTA de retornos MENSAL (pct_change de último preço do mês).
-    Detecta colunas padrão (Date/Data e Close/Adj Close/Fechamento/Price).
-    """
-    # Detect cols
     close_col = next((c for c in ["Adj Close", "AdjClose", "Close", "Fechamento", "Price"] if c in df.columns), None)
-    date_col = next((c for c in ["Date", "Data"] if c in df.columns), None)
+    date_col  = next((c for c in ["Date", "Data"] if c in df.columns), None)
     if close_col is None or date_col is None:
         raise ValueError("CSV precisa ter colunas de data e preço (ex.: 'Date' e 'Adj Close'/'Close').")
     dfx = df[[date_col, close_col]].dropna().copy()
     dfx[date_col] = pd.to_datetime(dfx[date_col], errors="coerce")
     dfx = dfx.dropna().sort_values(date_col)
-
-    # Detecta frequência: se houver muitas linhas por mês, é diário → reamostrar
     per_m = dfx[date_col].dt.to_period("M")
     counts = per_m.value_counts()
     if (counts.median() if len(counts) else 0) > 3:
         dfx = dfx.set_index(date_col).resample("M").last().reset_index()
-
     dfx["ret_mensal"] = dfx[close_col].pct_change()
     ret = dfx["ret_mensal"].dropna().astype(float).tolist()
     if len(ret) < 12:
         st.warning("Série mensal tem poucas observações (<12). Considere carregar histórico mais longo.")
     return ret
 
-
 # =============================
 # Modelo RV: Moving Block Bootstrap (MBB)
 # =============================
 
 def mbb_generate(months: int, n_sims: int, monthly_returns: np.ndarray, block_size: int, seed: Optional[int] = None) -> np.ndarray:
-    """
-    Moving Block Bootstrap para uma série de retornos mensais 1D.
-    Constrói, para cada simulação, uma sequência de 'months' retornos concatenando blocos de tamanho 'block_size'
-    extraídos com início aleatório, preservando a dependência intra-bloco.
-    """
     rng = np.random.default_rng(seed)
     x = monthly_returns.astype(float)
     T = x.shape[0]
     b = max(1, int(block_size))
     if T < b:
-        # fallback: i.i.d.
         return rng.choice(x, size=(months, n_sims), replace=True)
-
-    # Número de blocos necessários por sim
     n_blocks = int(np.ceil(months / b))
-    # índices de início possíveis (0..T-b)
     starts = np.arange(0, T - b + 1)
-
     out = np.zeros((months, n_sims), dtype=float)
     for s in range(n_sims):
         seq = []
@@ -132,7 +90,6 @@ def mbb_generate(months: int, n_sims: int, monthly_returns: np.ndarray, block_si
             seq.extend(x[i0:i0 + b])
         out[:, s] = np.array(seq[:months], dtype=float)
     return out
-
 
 # =============================
 # Simulador principal
@@ -150,73 +107,59 @@ def simulate_portfolio(
     eq_share_end: float,
     rebalance_monthly: bool = True,
     seed: Optional[int] = None,
-    # MBB
     block_size: int = 3,
-    # Casa
     enable_house: bool = False,
     house_price: float = 0.0,
-    house_mode: str = "avista",  # "avista" ou "divida"
+    house_mode: str = "avista",
     loan_pct: float = 0.8,
     loan_spread: float = 0.03,
     loan_years: int = 30,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
-    """
-    Simula portfólio com contribuições mensais e glide path de alocação (RV inicial->final).
-    RV (Ibov): Moving Block Bootstrap (MBB) sobre retornos mensais históricos.
-    Casa: à vista quando houver caixa OU via dívida (inicia automaticamente quando há entrada).
-    Prestação abate contribuição; shortfall retira do portfólio proporcionalmente.
-    """
+
     rng = np.random.default_rng(seed)
 
-    # Taxas
     rf_m = annual_to_monthly_rate(selic_annual)
     eq_monthly = np.array(ibov_monthly_returns, dtype=float)
     if eq_monthly.size == 0:
         raise ValueError("Lista de retornos mensais do Ibovespa está vazia.")
 
-    # RV por MBB
     eq_rets = mbb_generate(months=months, n_sims=n_sims, monthly_returns=eq_monthly, block_size=block_size, seed=seed)
 
-    # Glide path da alocação (fração de RV)
     eq_share_start = float(np.clip(eq_share_start, 0.0, 1.0))
-    eq_share_end = float(np.clip(eq_share_end, 0.0, 1.0))
-    gp = np.linspace(eq_share_start, eq_share_end, months)  # RV ao longo do tempo
+    eq_share_end   = float(np.clip(eq_share_end,   0.0, 1.0))
+    gp = np.linspace(eq_share_start, eq_share_end, months)
     rf_gp = 1.0 - gp
 
-    # Alocação inicial
-    total0 = float(initial_investment)
+    total0  = float(initial_investment)
     rf_hold = np.full(n_sims, rf_gp[0] * total0, dtype=float)
-    eq_hold = np.full(n_sims, gp[0] * total0, dtype=float)
+    eq_hold = np.full(n_sims, gp[0]   * total0, dtype=float)
 
-    # Saídas por mês/simulação
-    paths = np.zeros((months, n_sims), dtype=float)
-    contribs = np.zeros((months, n_sims), dtype=float)
+    paths         = np.zeros((months, n_sims), dtype=float)
+    contribs      = np.zeros((months, n_sims), dtype=float)
     mortgage_pays = np.zeros((months, n_sims), dtype=float)
-    house_withdraw = np.zeros((months, n_sims), dtype=float)
+    house_withdraw= np.zeros((months, n_sims), dtype=float)
 
-    # Flags / tracking da casa
-    purchased = np.zeros(n_sims, dtype=bool)
+    purchased  = np.zeros(n_sims, dtype=bool)
     purchase_m = np.full(n_sims, -1, dtype=int)
 
-    # Parâmetros da casa e tabela de amortização por contrato (se aplicável)
     if enable_house and house_price > 0:
         if house_mode == "avista":
-            dp = house_price
+            dp        = house_price
             principal = 0.0
-            loan_m = 0.0
-            n_pay = 0
-            pmt = 0.0
+            loan_m    = 0.0
+            n_pay     = 0
+            pmt       = 0.0
         else:
-            dp = house_price * (1.0 - loan_pct)  # entrada necessária
-            principal = house_price * loan_pct   # valor financiado
+            dp        = house_price * (1.0 - loan_pct)
+            principal = house_price * loan_pct
             annual_rate = max(0.0, selic_annual + loan_spread)
-            loan_m = annual_to_monthly_rate(annual_rate)
-            n_pay = max(1, int(loan_years * 12))
-            pmt = principal * loan_m / (1 - (1 + loan_m) ** (-n_pay)) if loan_m > 0 else principal / n_pay
+            loan_m    = annual_to_monthly_rate(annual_rate)
+            n_pay     = max(1, int(loan_years * 12))
+            pmt       = principal * loan_m / (1 - (1 + loan_m) ** (-n_pay)) if loan_m > 0 else principal / n_pay
     else:
         dp = principal = loan_m = 0.0
         n_pay = 0
-        pmt = 0.0
+        pmt   = 0.0
 
     house_stats = {
         "prob_compra": 0.0,
@@ -227,22 +170,20 @@ def simulate_portfolio(
         "taxa_mensal_emprestimo": loan_m,
         "total_pago_por_contrato": 0.0,
         "juros_totais_por_contrato": 0.0,
-        "amort_schedule": None,  # DataFrame (contrato único, parâmetros)
+        "amort_schedule": None,
     }
 
-    # Agenda de amortização (contrato “típico”, não replicada por sim: mesma taxa e prazo)
     if enable_house and house_price > 0 and house_mode == "divida" and pmt > 0 and principal > 0 and n_pay > 0:
         amort = amortization_table(principal=principal, monthly_rate=loan_m, n_pay=n_pay)
         house_stats["amort_schedule"] = amort
         house_stats["total_pago_por_contrato"] = float(amort["parcela"].sum())
         house_stats["juros_totais_por_contrato"] = float(amort["juros"].sum())
 
-    # Loop principal
     for t in range(months):
-        # Compra da casa (quando houver caixa para entrada)
         if enable_house and house_price > 0:
             current_total = rf_hold + eq_hold
-            mask = (~purchased) & (current_total >= dp) if dp > 0 else np.zeros_like(purchased, dtype=bool)
+            # CORREÇÃO: permitir compra imediata quando entrada dp == 0
+            mask = (~purchased) & ((current_total >= dp) if dp > 0 else True)
             if np.any(mask):
                 total_before_w = rf_hold[mask] + eq_hold[mask]
                 with np.errstate(divide="ignore", invalid="ignore"):
@@ -255,16 +196,14 @@ def simulate_portfolio(
                 purchased[mask] = True
                 purchase_m[mask] = t
 
-        # Contribuição do mês
         base_contr = contrib_pct * salary_path[t]
-        contr_vec = np.full(n_sims, base_contr, dtype=float)
+        contr_vec  = np.full(n_sims, base_contr, dtype=float)
 
-        # Prestação do financiamento (começa 1 mês após a compra, por até n_pay meses)
         if enable_house and house_price > 0 and house_mode == "divida" and pmt > 0:
             active = purchased
             if np.any(active):
                 months_since = np.where(active, t - purchase_m, -1)
-                pay_active = (months_since >= 1) & (months_since <= n_pay)
+                pay_active   = (months_since >= 1) & (months_since <= n_pay)
                 current_pays = np.where(pay_active, pmt, 0.0)
 
                 shortfall = current_pays - contr_vec
@@ -288,25 +227,21 @@ def simulate_portfolio(
 
         contribs[t, :] = contr_vec
 
-        # Rebalanceamento conforme glide path
         if rebalance_monthly:
             total_before = rf_hold + eq_hold + contr_vec
             rf_hold = rf_gp[t] * total_before
-            eq_hold = gp[t] * total_before
+            eq_hold = gp[t]   * total_before
         else:
             rf_hold += rf_gp[t] * contr_vec
-            eq_hold += gp[t] * contr_vec
+            eq_hold += gp[t]   * contr_vec
 
-        # Aplicar retornos
         rf_hold *= (1 + rf_m)
         eq_hold *= (1 + eq_rets[t, :])
 
         paths[t, :] = rf_hold + eq_hold
 
-    # Saídas
     month_index = pd.RangeIndex(1, months + 1, name="mês")
     paths_df = pd.DataFrame(paths, index=month_index)
-
     components_df = pd.DataFrame({
         "mês": np.repeat(np.arange(1, months + 1), n_sims),
         "sim": np.tile(np.arange(1, n_sims + 1), months),
@@ -316,7 +251,6 @@ def simulate_portfolio(
         "saque_casa": house_withdraw.flatten(order="C"),
     })
 
-    # Métricas de casa agregadas
     if enable_house and house_price > 0:
         comprou = purchased
         house_stats["prob_compra"] = float(np.mean(comprou))
@@ -324,15 +258,12 @@ def simulate_portfolio(
 
     return paths_df, components_df, house_stats
 
-
 def amortization_table(principal: float, monthly_rate: float, n_pay: int) -> pd.DataFrame:
-    """Tabela SAC/PRICE (PRICE) — parcela fixa; retorna DataFrame com juros, amortização, saldo."""
     if n_pay <= 0 or principal <= 0:
         return pd.DataFrame(columns=["mes", "parcela", "juros", "amortizacao", "saldo"])
     if monthly_rate <= 0:
         pmt = principal / n_pay
-        rows = []
-        bal = principal
+        rows, bal = [], principal
         for m in range(1, n_pay + 1):
             j = 0.0
             a = pmt
@@ -340,8 +271,7 @@ def amortization_table(principal: float, monthly_rate: float, n_pay: int) -> pd.
             rows.append((m, pmt, j, a, bal))
         return pd.DataFrame(rows, columns=["mes", "parcela", "juros", "amortizacao", "saldo"])
     pmt = principal * monthly_rate / (1 - (1 + monthly_rate) ** (-n_pay))
-    rows = []
-    bal = principal
+    rows, bal = [], principal
     for m in range(1, n_pay + 1):
         j = bal * monthly_rate
         a = pmt - j
@@ -349,9 +279,7 @@ def amortization_table(principal: float, monthly_rate: float, n_pay: int) -> pd.
         rows.append((m, pmt, j, a, bal))
     return pd.DataFrame(rows, columns=["mes", "parcela", "juros", "amortizacao", "saldo"])
 
-
 def summarize_simulations(paths_df: pd.DataFrame) -> pd.DataFrame:
-    """Resumo (p5, p25, p50, p75, p95, média) por mês."""
     percentiles = [5, 25, 50, 75, 95]
     summary = paths_df.quantile(q=[p / 100 for p in percentiles], axis=1).T
     summary.columns = [f"p{p}" for p in percentiles]
@@ -359,7 +287,6 @@ def summarize_simulations(paths_df: pd.DataFrame) -> pd.DataFrame:
     summary["mês"] = summary.index
     summary = summary.set_index("mês")
     return summary
-
 
 def final_distribution_stats(final_values: np.ndarray, target: Optional[float] = None) -> dict:
     stats = {
@@ -378,14 +305,11 @@ def final_distribution_stats(final_values: np.ndarray, target: Optional[float] =
         stats["prob_ge_target"] = np.nan
     return stats
 
-
 def pv_required_for_income(monthly_income: float, years: Optional[int], real_annual_return: float, growth_annual: float = 0.0) -> float:
-    """PV necessário (início da aposentadoria) para pagar renda mensal por 'years' anos (ou perpetuidade crescente)."""
     r_m = annual_to_monthly_rate(real_annual_return)
     g_m = annual_to_monthly_rate(growth_annual)
     pmt = monthly_income
     if years is None:
-        # perpetuidade crescente: PV = pmt / (r - g)
         if r_m <= g_m:
             return float("inf")
         return pmt / (r_m - g_m)
@@ -394,7 +318,6 @@ def pv_required_for_income(monthly_income: float, years: Optional[int], real_ann
         return pmt * n / (1 + r_m)
     pv = pmt * (1 - ((1 + g_m) / (1 + r_m)) ** n) / (r_m - g_m)
     return pv
-
 
 # =============================
 # App Streamlit
@@ -407,25 +330,22 @@ def main():
     with st.sidebar:
         st.header("Entradas")
 
-        # Salário: curva com decaimento
         base_salary = st.number_input("Salário mensal atual (R$)", min_value=0.0, value=8000.0, step=500.0)
-        curve_name = st.selectbox("Trajetória de carreira (base)", list(DEFAULT_CURVES.keys()), index=1)
-        curve = DEFAULT_CURVES[curve_name]
+        curve_name  = st.selectbox("Trajetória de carreira (base)", list(DEFAULT_CURVES.keys()), index=1)
+        curve       = DEFAULT_CURVES[curve_name]
         annual_growth0 = st.slider(f"Crescimento anual inicial para {curve.name}", -0.05, 0.25, curve.annual_growth_pct, 0.005)
-        half_life = st.slider("Meia-vida do crescimento (anos)", 1.0, 15.0, 5.0, 0.5,
-                              help="Após este tempo, o crescimento anual 'cai' pela metade.")
-        growth_floor = st.slider("Piso do crescimento anual no longo prazo", -0.02, 0.10, 0.02, 0.0025)
+        half_life      = st.slider("Meia-vida do crescimento (anos)", 1.0, 15.0, 5.0, 0.5)
+        growth_floor   = st.slider("Piso do crescimento anual no longo prazo", -0.02, 0.10, 0.02, 0.0025)
 
         contrib_pct = st.slider("% do salário investido por mês", 0, 100, 25, 1, format="%d%%") / 100
 
-        # Glide path
         st.subheader("Alocação (glide path)")
         eq_start = st.slider("RV (Ibovespa) inicial", 0, 100, 60, 1, format="%d%%") / 100
-        eq_end = st.slider("RV (Ibovespa) final", 0, 100, 40, 1, format="%d%%") / 100
+        eq_end   = st.slider("RV (Ibovespa) final",   0, 100, 40, 1, format="%d%%") / 100
 
         initial_investment = st.number_input("Investimento inicial (R$)", min_value=0.0, value=30000.0, step=1000.0)
-
-        years = st.slider("Horizonte de investimento (anos)", 1, 40, 20); months = years * 12
+        years  = st.slider("Horizonte de investimento (anos)", 1, 40, 20)
+        months = years * 12
 
         st.subheader("Premissas de retorno")
         selic_annual = st.slider("Selic (anual, nominal)", 0.00, 0.20, 0.10, 0.0025, format="%0.2f")
@@ -455,32 +375,31 @@ def main():
                 ibov_monthly_returns = expand_annual_to_monthly_series(DEFAULT_IBOV_LAST10, years_each=1, noise=0.01)
                 st.warning("Usando placeholders mensais (com leve ruído). Prefira CSV real.")
 
-        n_sims = st.slider("Número de simulações", 100, 20000, 5000, 100)
-        seed_opt = st.text_input("Seed aleatória (opcional)", value=""); seed = int(seed_opt) if seed_opt.strip().isdigit() else None
+        n_sims  = st.slider("Número de simulações", 100, 20000, 5000, 100)
+        seed_opt= st.text_input("Seed aleatória (opcional)", value="")
+        seed    = int(seed_opt) if seed_opt.strip().isdigit() else None
 
         advanced = st.expander("Opções avançadas")
         with advanced:
-            rebalance = st.toggle("Rebalancear mensalmente conforme glide path", value=True)
+            rebalance  = st.toggle("Rebalancear mensalmente conforme glide path", value=True)
             block_size = st.slider("Tamanho do bloco (MBB)", 1, 12, 3, 1, help="Blocos maiores preservam mais dependência temporal.")
-            show_salary = st.toggle("Mostrar gráficos de salário e contribuições", value=True)
+            show_salary= st.toggle("Mostrar gráficos de salário e contribuições", value=True)
 
-        # Habitação
         st.subheader("Habitação (opcional)")
         enable_house = st.toggle("Ativar compra de casa", value=False)
-        house_params = {}
+        house_params: Dict[str, float | int | str] = {}
         if enable_house:
             house_price = st.number_input("Valor da casa (R$)", min_value=0.0, value=500_000.0, step=10_000.0)
-            house_mode = st.radio("Modo de compra", ["à vista quando houver caixa", "financiada (dívida)"])
+            house_mode  = st.radio("Modo de compra", ["à vista quando houver caixa", "financiada (dívida)"])
             if "financiada" in house_mode:
-                loan_pct = st.slider("Percentual financiado", 0, 100, 80, 5, format="%d%%") / 100
+                loan_pct    = st.slider("Percentual financiado", 0, 100, 80, 5, format="%d%%") / 100
                 loan_spread = st.slider("Spread anual sobre a Selic", -0.05, 0.30, 0.03, 0.0025, format="%0.3f")
-                loan_years = st.slider("Prazo (anos)", 5, 35, 30, 1)
-                # Preview da parcela
+                loan_years  = st.slider("Prazo (anos)", 5, 35, 30, 1)
                 annual_rate = max(0.0, selic_annual + loan_spread)
-                loan_m = annual_to_monthly_rate(annual_rate)
-                principal = house_price * loan_pct
-                n_pay = int(loan_years * 12)
-                pmt = principal * loan_m / (1 - (1 + loan_m) ** (-n_pay)) if (loan_m > 0 and n_pay > 0) else (principal / n_pay if n_pay > 0 else 0.0)
+                loan_m      = annual_to_monthly_rate(annual_rate)
+                principal   = house_price * loan_pct
+                n_pay       = int(loan_years * 12)
+                pmt         = principal * loan_m / (1 - (1 + loan_m) ** (-n_pay)) if (loan_m > 0 and n_pay > 0) else (principal / n_pay if n_pay > 0 else 0.0)
                 st.info(f"Parcela estimada: R$ {pmt:,.2f} | Total pago: R$ {pmt*n_pay:,.0f} | Juros: R$ {(pmt*n_pay - principal):,.0f}")
                 house_params.update(dict(house_price=house_price, house_mode="divida", loan_pct=loan_pct, loan_spread=loan_spread, loan_years=loan_years))
             else:
@@ -489,25 +408,12 @@ def main():
         else:
             house_params.update(dict(house_price=0.0, house_mode="avista", loan_pct=0.0, loan_spread=0.0, loan_years=0))
 
-        # ===== META DE APOSENTADORIA (perpetuidade nominal; principal preservado) =====
-        st.subheader("Meta de aposentadoria")
-
-        desired_income = st.number_input(
-            "Renda mensal desejada (R$)",
-            min_value=0.0, value=30_000.0, step=1_000.0
-        )
-
-        # Vamos usar a taxa nominal já existente (Selic anual) como taxa de juros da fase de aposentadoria.
-        # Se quiser uma taxa separada, crie um slider específico e troque ret_yield_annual abaixo.
-        ret_yield_annual = selic_annual  # taxa nominal para perpetuidade
-
-        # Compatibilidade com código legado:
-        treat_as_perpetuity = True  # sempre perpetuidade
-        retire_years_income = None  # não há horizonte finito
-        income_growth_real = 0.0  # ignorado; pagamentos nominais estáveis
-
-        # PV necessário para pagar PMT indefinidamente, sem consumir principal (nominal):
-        r_m_nom = annual_to_monthly_rate(ret_yield_annual)
+        st.subheader("Meta de aposentadoria (nominal, viver só dos juros)")
+        desired_income = st.number_input("Renda mensal desejada (R$)", min_value=0.0, value=30_000.0, step=1_000.0)
+        treat_as_perpetuity   = True
+        retire_years_income   = None
+        income_growth_real    = 0.0  # ignorado
+        r_m_nom = annual_to_monthly_rate(selic_annual)
         if r_m_nom <= 0:
             required_pv = float("inf")
             st.caption("Capital necessário (perpetuidade): **∞** (taxa de juros ≤ 0).")
@@ -515,9 +421,11 @@ def main():
             required_pv = desired_income / r_m_nom
             st.caption(f"Capital necessário (perpetuidade; principal preservado): **R$ {required_pv:,.0f}**")
 
+        if n_sims >= 10000 or months >= 360:
+            st.info("Dica de performance: se o app ficar lento, reduza o número de simulações ou o horizonte.")
+
         run_btn = st.button("Rodar simulação", type="primary")
 
-    # Salário com decaimento
     salary_path = compute_salary_path_decay(
         base_salary=base_salary,
         months=months,
@@ -526,7 +434,6 @@ def main():
         annual_growth_floor=growth_floor
     )
 
-    # Abas
     tab_overview, tab_dist, tab_assump, tab_house, tab_sens, tab_data = st.tabs(
         ["Visão Geral", "Distribuições", "Premissas", "Habitação", "Sensibilidade", "Dados"]
     )
@@ -550,9 +457,42 @@ def main():
                 **house_params,
             )
 
-        # Resumo
         summary = summarize_simulations(paths_df)
-        final_vals = paths_df.iloc[-1, :].values
+
+        # ===== Balloon: descontar saldo devedor remanescente na aposentadoria =====
+        final_vals = paths_df.iloc[-1, :].to_numpy(dtype=float)
+        saldo_remanescente = np.zeros_like(final_vals)
+        if enable_house and house_params.get("house_mode") == "divida":
+            n_pay = int(house_info.get("n_parcelas", 0) or 0)
+            pmt   = float(house_info.get("pmt", 0.0) or 0.0)
+            i     = float(house_info.get("taxa_mensal_emprestimo", 0.0) or 0.0)
+            P     = float(house_info.get("principal", 0.0) or 0.0)
+            if n_pay > 0 and pmt > 0 and P > 0:
+                paying_flag = (components_df["prestacao"] > 0).astype(int)
+                pagos_por_sim = (
+                    components_df.assign(pagando=paying_flag)
+                    .groupby("sim", as_index=False)["pagando"].sum()
+                    .set_index("sim")
+                    .reindex(range(1, final_vals.size + 1))
+                    .fillna(0)
+                    .astype(int)
+                )
+                k_vec = pagos_por_sim["pagando"].to_numpy()
+                if i > 0:
+                    fator = (1.0 + i) ** k_vec
+                    saldo = P * fator - pmt * (fator - 1.0) / i
+                else:
+                    saldo = np.maximum(P - pmt * k_vec, 0.0)
+                saldo[k_vec >= n_pay] = 0.0
+                saldo_remanescente = saldo
+        final_vals = final_vals - saldo_remanescente
+        pend = np.mean(saldo_remanescente > 0) * 100
+        if pend > 0:
+            st.markdown(
+                f"**Nota:** {pend:.1f}% das simulações chegam à aposentadoria ainda com saldo devedor; "
+                f"aplicado *balloon* (desconto do saldo) no patrimônio final."
+            )
+
         stats = final_distribution_stats(final_vals, target=required_pv)
 
         with tab_overview:
@@ -579,11 +519,7 @@ def main():
             st.altair_chart(fan_chart, use_container_width=True)
 
             st.markdown(f"**Glide path:** RV {int(eq_start*100)}% → {int(eq_end*100)}% | **Contribuição:** {int(contrib_pct*100)}% do salário")
-            meta_txt = (
-                f"**Meta:** R$ {desired_income:,.0f}/mês (nominal) | "
-                f"juros {selic_annual * 100:.1f}% a.a. | principal preservado"
-            )
-            st.markdown(meta_txt)
+            st.markdown("**Todas as métricas estão em valores nominais.** A meta de renda é nominal e assume investimento 100% na taxa de juros indicada (Selic) durante a aposentadoria, preservando o principal.")
 
             if show_salary:
                 st.subheader("Salário e contribuições")
@@ -599,40 +535,49 @@ def main():
         with tab_dist:
             st.subheader("Distribuição final do portfólio")
             hist_df = pd.DataFrame({"valor_final": final_vals})
-            step = max(1.0, (hist_df["valor_final"].max() - hist_df["valor_final"].min()) / 50)
+            _range = float(hist_df["valor_final"].max() - hist_df["valor_final"].min())
+            step   = max(_range / 60.0, 10_000.0)  # CORREÇÃO: bins com passo mínimo grande
             hist = (
                 alt.Chart(hist_df)
                 .transform_bin("bin_final", field="valor_final", bin=alt.Bin(step=step))
                 .transform_aggregate(count="count()", groupby=["bin_final"])
                 .mark_bar()
-                .encode(x=alt.X("bin_final:Q", title="Portfólio final (R$)"), y=alt.Y("count:Q", title="Frequência"))
+                .encode(x=alt.X("bin_final:Q", title="Portfólio final (R$)"),
+                        y=alt.Y("count:Q", title="Frequência"))
                 .properties(height=320)
             )
+            st.altair_chart(hist, use_container_width=True)
 
             st.subheader("ECDF do valor final")
             vals = np.sort(final_vals)
-            ecdf_df = pd.DataFrame({"valor_final": vals, "ecdf": np.arange(1, len(vals) + 1) / len(vals)})
+            ecdf_vals = np.arange(1, len(vals) + 1) / len(vals)
+            ecdf_df = pd.DataFrame({"valor_final": vals, "ecdf": ecdf_vals})
             base = (
                 alt.Chart(ecdf_df)
                 .mark_line()
-                .encode(x=alt.X("valor_final:Q", title="Portfólio final (R$)"),
-                        y=alt.Y("ecdf:Q", title="F(Valor Final)"))
+                .encode(
+                    x=alt.X("valor_final:Q", title="Portfólio final (R$)"),
+                    y=alt.Y("ecdf:Q", title="F(Valor Final)"),
+                    tooltip=[
+                        alt.Tooltip("valor_final:Q", title="Portfólio (R$)", format=",.0f"),
+                        alt.Tooltip("ecdf:Q",        title="P(≤ x)", format=".1%"),
+                        alt.Tooltip("ecdf:Q",        title="P(≥ x) = 1 - P(≤ x)", format=".1%")
+                    ]
+                )
                 .properties(height=240)
             )
-
-            charts = [base]
+            layers = [base]
             if np.isfinite(required_pv):
-                # Linha da meta
+                p_le = float(np.mean(final_vals <= required_pv))
+                p_ge = 1.0 - p_le
                 rule = alt.Chart(pd.DataFrame({"x": [required_pv]})).mark_rule(strokeDash=[6,3]).encode(x="x:Q")
-                # Tooltip da probabilidade de ≥ meta
-                prob = float(np.mean(final_vals >= required_pv))
-                label = alt.Chart(pd.DataFrame({"x": [required_pv], "y": [1 - prob], "txt": [f"P(≥ meta) = {prob*100:.1f}%"]})) \
-                        .mark_text(align="left", dx=5, dy=-5) \
+                point = alt.Chart(pd.DataFrame({"x":[required_pv], "y":[p_le]})).mark_point(size=60).encode(x="x:Q", y="y:Q")
+                label = alt.Chart(pd.DataFrame({"x":[required_pv], "y":[p_le], "txt":[f"P(≥ meta) = {p_ge*100:.1f}%"]})) \
+                        .mark_text(align="left", dx=8, dy=-8) \
                         .encode(x="x:Q", y="y:Q", text="txt:N")
-                charts += [rule, label]
+                layers += [rule, point, label]
+            st.altair_chart(alt.layer(*layers), use_container_width=True)
 
-            st.altair_chart(alt.layer(*charts), use_container_width=True)
-            # Stats com coloração condicional
             gap = final_vals - (required_pv if np.isfinite(required_pv) else np.nan)
             gap_stats = {
                 "prob_atinge_meta": float(np.mean(gap >= 0)) if np.isfinite(required_pv) else np.nan,
@@ -644,7 +589,6 @@ def main():
             st.subheader("Estatísticas chave")
             df_stats = pd.DataFrame([{**stats, **gap_stats}])
 
-            # formatação BR + coloração condicional
             def fmt_money(s: pd.Series) -> pd.Series:
                 return s.apply(lambda x: "" if pd.isna(x) else f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
@@ -653,7 +597,7 @@ def main():
 
             styled = df_stats.copy()
             money_cols = ["mean", "median", "p5", "p25", "p75", "p95", "min", "max", "mediana_gap", "p5_gap", "p95_gap"]
-            prob_cols = ["prob_ge_target", "prob_atinge_meta"]
+            prob_cols  = ["prob_ge_target", "prob_atinge_meta"]
             for c in money_cols:
                 if c in styled.columns:
                     styled[c] = fmt_money(styled[c])
@@ -661,7 +605,6 @@ def main():
                 if c in styled.columns:
                     styled[c] = fmt_percent(styled[c])
 
-            # Renomear para PT
             rename_map = {
                 "mean": "Média final (R$)",
                 "median": "Mediana final (R$)",
@@ -672,19 +615,20 @@ def main():
             }
             styled = styled.rename(columns=rename_map)
 
-            # Coloração condicional por prob(≥ meta)
             base_prob = stats.get("prob_ge_target", np.nan)
             color = "gray"
             if np.isfinite(base_prob):
                 if base_prob >= 0.70:
-                    color = "#2e7d32"  # verde
+                    color = "#2e7d32"
                 elif base_prob >= 0.40:
-                    color = "#f9a825"  # amarelo
+                    color = "#f9a825"
                 else:
-                    color = "#c62828"  # vermelho
-            st.markdown(f"<div style='border-left:8px solid {color}; padding:8px 12px; background:#1111; border-radius:6px;'>"
-                        f"<b>Status meta:</b> {'' if not np.isfinite(base_prob) else f'{base_prob*100:.1f}%'}"
-                        f"</div>", unsafe_allow_html=True)
+                    color = "#c62828"
+            st.markdown(
+                f"<div style='border-left:8px solid {color}; padding:8px 12px; background:#1111; border-radius:6px;'>"
+                f"<b>Status meta:</b> {'' if not np.isfinite(base_prob) else f'{base_prob*100:.1f}%'}"
+                f"</div>", unsafe_allow_html=True
+            )
             st.dataframe(styled, use_container_width=True, hide_index=True)
 
             st.download_button("Baixar distribuição final CSV",
@@ -707,10 +651,10 @@ def main():
         with tab_assump:
             st.subheader("Resumo das premissas de retorno")
             eq_monthly = np.array(ibov_monthly_returns, dtype=float)
-            mu_m = float(np.mean(eq_monthly))
-            sigma_m = float(np.std(eq_monthly, ddof=1)) if len(eq_monthly) > 1 else 0.0
-            mu_a = monthly_to_annual_rate(mu_m)
-            sigma_a = sigma_m * math.sqrt(12)
+            mu_m   = float(np.mean(eq_monthly))
+            sigma_m= float(np.std(eq_monthly, ddof=1)) if len(eq_monthly) > 1 else 0.0
+            mu_a   = monthly_to_annual_rate(mu_m)
+            sigma_a= sigma_m * math.sqrt(12)
 
             a1, a2, a3 = st.columns(3)
             a1.metric("Média Ibovespa (mensal)", f"{mu_m*100:0.2f}%")
@@ -741,7 +685,6 @@ def main():
                     st.subheader("Tabela de amortização (contrato)")
                     if house_info["amort_schedule"] is not None:
                         amort = house_info["amort_schedule"].copy()
-                        # formatação curta
                         show_amort = amort.copy()
                         for col in ["parcela", "juros", "amortizacao", "saldo"]:
                             show_amort[col] = show_amort[col].map(lambda x: f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
@@ -752,74 +695,63 @@ def main():
                 else:
                     st.metric("Valor da compra à vista", f"R$ {house_params['house_price']:,.0f}")
 
-                st.subheader("Fluxos mensais de prestação (média por mês entre as sims)")
-                pays_mean = components_df.groupby("mês", as_index=False)["prestacao"].mean()
-                positive = pays_mean[pays_mean["prestacao"] > 0]
-                if positive.empty:
-                    st.info("Sem prestações no horizonte (pode ser à vista, não atingiu entrada, ou contrato começa só após o horizonte).")
+                st.subheader("Percentual de simulações com prestação ativa por mês")
+                if house_params.get("house_mode") == "divida":
+                    paying_flag = components_df.copy()
+                    paying_flag["pagando"] = (paying_flag["prestacao"] > 0).astype(int)
+                    paying_share = paying_flag.groupby("mês", as_index=False)["pagando"].mean()
+                    paying_share["pct"] = paying_share["pagando"] * 100.0
+                    if paying_share["pct"].max() == 0:
+                        st.info("Nenhuma simulação entrou em fase de pagamento dentro do horizonte.")
+                    else:
+                        paying_chart = (
+                            alt.Chart(paying_share)
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X("mês:Q", title="Mês"),
+                                y=alt.Y("pct:Q", title="% de simulações com parcela ativa", scale=alt.Scale(domain=[0, 100])),
+                                tooltip=[alt.Tooltip("mês:Q"), alt.Tooltip("pct:Q", format=".1f")]
+                            )
+                            .properties(height=240)
+                        )
+                        st.altair_chart(paying_chart, use_container_width=True)
                 else:
-                    pay_chart = (
-                        alt.Chart(positive)
-                        .mark_bar()
-                        .encode(x=alt.X("mês:Q", title="Mês"), y=alt.Y("prestacao:Q", title="Prestação média (R$)"))
-                        .properties(height=220)
-                    )
-                    st.altair_chart(pay_chart, use_container_width=True)
+                    st.info("Financiamento não selecionado — gráfico de prestação ativa não se aplica.")
 
-                # === Substitui o bloco "Saques para entrada/à vista (média por mês)" por este ===
                 if house_params.get("house_mode") == "avista":
                     st.subheader("Probabilidade acumulada de compra (à vista)")
-
-                    # Para cada mês, proporção de sims com saque_casa > 0 em qualquer mês até aquele
-                    purchase_flags = (
-                        components_df.groupby(["sim", "mês"], as_index=False)["saque_casa"]
-                        .sum()
-                        .assign(compra=lambda d: d["saque_casa"] > 0)
-                    )
-                    # Marca o primeiro mês de compra por sim
+                    # CORREÇÃO: cálculo direto do primeiro mês de compra por simulação
                     first_purchase = (
-                        purchase_flags.loc[purchase_flags["compra"]]
+                        components_df.loc[components_df["saque_casa"] > 0, ["sim", "mês"]]
                         .groupby("sim", as_index=False)["mês"]
                         .min()
                     )
-
                     if first_purchase.empty:
-                        st.info(
-                            "Nenhuma simulação atingiu o valor da casa no horizonte — probabilidade de compra nula.")
+                        st.info("Nenhuma simulação atingiu o valor da casa no horizonte — probabilidade de compra nula.")
                     else:
-                        # Calcula CDF: % de sims que já compraram até cada mês
                         total_sims = components_df["sim"].nunique()
                         cdf = (
-                            first_purchase.groupby("mês", as_index=False)
-                            .size()
-                            .rename(columns={"size": "compras_no_mes"})
-                            .sort_values("mês")
+                            first_purchase["mês"]
+                            .value_counts()
+                            .sort_index()
+                            .rename_axis("mês")
+                            .reset_index(name="compras_no_mes")
                         )
                         cdf["compras_acumuladas"] = cdf["compras_no_mes"].cumsum()
                         cdf["prob_acumulada"] = cdf["compras_acumuladas"] / total_sims
-
                         chart = (
                             alt.Chart(cdf)
                             .mark_line(point=True)
                             .encode(
                                 x=alt.X("mês:Q", title="Mês"),
-                                y=alt.Y(
-                                    "prob_acumulada:Q",
-                                    title="Probabilidade acumulada de compra",
-                                    axis=alt.Axis(format="%"),
-                                    scale=alt.Scale(domain=[0, 1]),
-                                ),
-                                tooltip=[
-                                    alt.Tooltip("mês:Q", title="Mês"),
-                                    alt.Tooltip("prob_acumulada:Q", title="Prob. acumulada", format=".1%"),
-                                ],
+                                y=alt.Y("prob_acumulada:Q", title="Probabilidade acumulada de compra", axis=alt.Axis(format="%"), scale=alt.Scale(domain=[0, 1])),
+                                tooltip=[alt.Tooltip("mês:Q", title="Mês"), alt.Tooltip("prob_acumulada:Q", title="Prob. acumulada", format=".1%")],
                             )
                             .properties(height=240)
                         )
                         st.altair_chart(chart, use_container_width=True)
                 else:
-                    st.caption(
-                        "Compra financiada: gráfico de probabilidade omitido. Use as métricas de probabilidade e mediana do mês de compra acima.")
+                    st.caption("Compra financiada: gráfico de probabilidade omitido. Use as métricas acima.")
 
         with tab_sens:
             st.subheader("Análise de sensibilidade (em breve)")
@@ -828,7 +760,6 @@ def main():
         with tab_data:
             st.subheader("Retornos mensais do Ibovespa usados")
             st.dataframe(pd.DataFrame({"retorno_mensal": ibov_monthly_returns}), use_container_width=True)
-
             st.subheader("Parâmetros da simulação")
             st.json({
                 "salário_base": base_salary,
@@ -849,8 +780,8 @@ def main():
                 "meta": {
                     "modo": "perpetuidade_nominal",
                     "renda_mensal": desired_income,
-                    "anos": retire_years_income,   # sempre None
-                    "taxa_nominal_aposentadoria": selic_annual,  # ou sua taxa própria, se criar um slider separado
+                    "anos": retire_years_income,
+                    "taxa_nominal_aposentadoria": selic_annual,
                     "PV_necessário": None if not np.isfinite(required_pv) else round(required_pv, 2),
                 },
             })
@@ -858,7 +789,6 @@ def main():
     else:
         with tab_overview:
             st.info("Defina entradas, carregue retornos mensais (CSV) e clique em **Rodar simulação**.")
-
 
 if __name__ == "__main__":
     main()
