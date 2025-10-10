@@ -1,257 +1,147 @@
-Simulador de Aposentadoria — README
-Visão geral
 
-Aplicativo Streamlit para planejar aposentadoria com:
+# 🧮 Simulador de Aposentadoria — README
 
-Simulações Monte Carlo do portfólio (RF/RV),
+## 📘 Visão Geral
 
-Glide path (alocação em renda variável diminuindo ao longo do tempo),
+Aplicativo **Streamlit** para planejamento de aposentadoria com:
+- **Simulações Monte Carlo** (RF/RV);
+- **Glide path** (reduz risco com o tempo);
+- **Curva salarial com decaimento** (cresce mais no início, desacelera depois);
+- **Compra de imóvel** (à vista ou financiado com ajuste *balloon*);
+- Visualizações interativas: distribuição final, probabilidade de meta e mais.
 
-Curva salarial com decaimento (cresce mais no início da carreira e desacelera),
+> **Meta atual:** viver **somente dos juros (perpetuidade nominal)** — o principal é preservado e o rendimento mensal cobre a renda-alvo.
 
-Compra de imóvel (à vista ou financiado), com ajuste “balloon” no fim do horizonte,
+---
 
-Métricas claras: distribuição final, probabilidade de atingir meta e gráficos explicativos.
+## ⚙️ Funcionalidades Principais
 
-Meta de aposentadoria no app (padrão atual): viver somente dos juros (perpetuidade nominal) — o principal é preservado. A renda desejada mensal é paga com o rendimento do portfólio investido a uma taxa nominal (por padrão, a Selic escolhida nas entradas).
+- **Monte Carlo + Moving Block Bootstrap (MBB)** para capturar dependência temporal nos retornos;
+- **Renda Fixa (Selic)** como proxy da perna conservadora;
+- **Glide path** personalizável;
+- **Habitação**:
+  - À vista → compra quando o portfólio atinge o valor;
+  - Financiada → começa ao ter o valor da entrada;
+  - “**Balloon**” no final → saldo devedor descontado no patrimônio;
+  - Gráficos: % de simulações pagando parcelas / probabilidade acumulada de compra;
+- **Meta de aposentadoria** baseada em perpetuidade nominal (renda vitalícia pelos juros).
 
-Principais recursos
+---
 
-Monte Carlo com Moving Block Bootstrap (MBB) sobre retornos mensais do Ibovespa (preserva dependência temporal de curto prazo).
+## 🧠 Como Funciona
 
-Renda fixa (Selic) como proxy da perna conservadora.
+### 1️⃣ Retornos
+- Usa retornos **mensais do Ibovespa** (ou CSV diário → convertido).
+- **MBB** amostra blocos consecutivos para manter autocorrelação.
 
-Glide path: informe RV inicial e final (p. ex. 60% → 40%).
+### 2️⃣ Glide Path
+- Alocação em renda variável decresce linearmente do valor inicial ao final.
 
-Curva salarial com decaimento: crescimento anual inicial, meia-vida e piso de longo prazo.
+### 3️⃣ Salário e Contribuições
+- Crescimento salarial decrescente com meia-vida ajustável.
+- Contribuição mensal = % salário.
 
-Habitação:
+### 4️⃣ Habitação
+- **À vista:** compra ao atingir o preço total.
+- **Financiada:**
+  - Entrada = (1 − financiamento) × preço;
+  - Financia o restante (PRICE fixo);
+  - Prestação abate contribuição e/ou portfólio;
+  - Se restar dívida no final → *balloon* (deduzido do patrimônio).
 
-À vista: compra quando o portfólio tem caixa para o preço.
+### 5️⃣ Meta de Aposentadoria
+- Capital alvo:  
+  \\( PV = \frac{renda\_mensal}{r\_m} \\)  
+  onde \( r\_m = (1 + selic)^{1/12} - 1 \)
 
-Financiada: compra quando há entrada; prestação (PRICE) primeiro abate a contribuição mensal; se faltar, retira do portfólio proporcionalmente.
+---
 
-Balloon no fim do horizonte: qualquer saldo devedor remanescente é descontado do patrimônio final (simulando quitação).
+## 🧩 Instalação
 
-Gráficos: % de simulações com parcela ativa por mês (financiada) e CDF de probabilidade acumulada de compra (à vista).
-
-Análises visuais:
-
-Fan chart (p5–p95),
-
-Histograma/ECDF do valor final com linha da meta e tooltip de probabilidade,
-
-Tabela de estatísticas chave com coloração condicional.
-
-Importação flexível de dados do Ibovespa (CSV diário ou mensal).
-
-Como funciona (por dentro)
-1) Retornos
-
-Ibovespa: você fornece retornos mensais (ou um CSV diário/mensal; o app converte para mensal).
-
-MBB (Moving Block Bootstrap): amostra blocos de tamanho b meses para cada simulação, preservando autocorrelação intra-bloco.
-
-2) Glide path
-
-Fração de RV gp[t] varia linearmente do RV inicial → RV final ao longo dos meses.
-
-Rebalanceamento mensal opcional para acompanhar o glide path.
-
-3) Salário e contribuições
-
-Curva salarial com decaimento: crescimento anual começa em g0, decai com meia-vida definida e converge para um piso.
-
-Contribuição mensal = % contrib × salário do mês.
-
-4) Habitação
-
-À vista: quando total_portfólio ≥ preço, ocorre saque imediato (composição proporcional RF/RV).
-
-Financiada:
-
-Entrada = (1 − loan_pct)*preço. Compra assim que houver caixa para a entrada.
-
-Prestação (PRICE) começa um mês após a compra, por n_pay = anos*12 meses; parcela fixa pmt.
-
-Ordem dos fluxos mensais:
-
-contribuições entram,
-
-parcela abate contribuição;
-
-faltou? retira do portfólio proporcionalmente (RF/RV).
-
-Na aposentadoria (fim do horizonte): se ainda houver parcelas pendentes, calcula-se o saldo devedor remanescente e desconta do portfólio (ajuste balloon). As estatísticas finais usam esse patrimônio líquido.
-
-5) Meta de aposentadoria (perpetuidade nominal)
-
-Viver dos juros, preservando o principal.
-
-Capital necessário: PV = renda_mensal / r_m, onde r_m é a taxa nominal mensal (por padrão, convertida a partir da Selic definida nas entradas).
-
-Sem correção por inflação no cálculo atual — meta e retornos estão em termos nominais.
-
-Instalação
-
-Pré-requisitos
-
-Python 3.9+ recomendado
-
-pip / venv
-
-Clonar e instalar dependências
-
+```bash
 git clone <seu-repo>.git
 cd <seu-repo>
 python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
+# Windows
+.venv\Scripts\activate
+# Linux/Mac
+source .venv/bin/activate
 pip install -r requirements.txt
+```
 
+Ou manualmente:
+```bash
+pip install streamlit pandas numpy altair
+```
 
-Se não tiver um requirements.txt, comece com:
+---
 
-streamlit>=1.32
-pandas>=2.0
-numpy>=1.24
-altair>=5.0
+## ▶️ Execução
 
-Execução
+```bash
 streamlit run app.py
+```
 
+Abrirá em: [http://localhost:8501](http://localhost:8501)
 
-O navegador abrirá em http://localhost:8501.
+---
 
-Entrada de dados (CSV do Ibovespa)
+## 📊 Gráficos e Saídas
 
-Arquivo com colunas de data e preço:
+| Aba | Conteúdo |
+|-----|-----------|
+| **Visão Geral** | Fan chart (p5–p95), métricas e probabilidade de meta |
+| **Distribuições** | Histograma, ECDF com linha de meta e tooltip |
+| **Premissas** | Estatísticas de retornos, Selic, glide path, salário |
+| **Habitação** | Parcelas médias / % sims com parcelas ativas / CDF de compra |
+| **Dados** | Parâmetros e retornos usados |
 
-Data: Date ou Data
+---
 
-Preço: Adj Close, AdjClose, Close, Fechamento ou Price
+## 🧾 Exemplo de Meta
 
-O app detecta frequência; se diário, reamostra para último preço do mês e calcula pct_change mensal.
+Com Selic = 12% a.a. → \( r_m ≈ 0,009489 \)  
+Renda mensal desejada = **R$ 30.000**  
+\( PV = 30.000 / 0.009489 ≈ 3,16 milhões \)
 
-Também é possível editar manualmente uma série mensal semente (placeholders).
+---
 
-Parâmetros importantes
+## ⚡ Dicas de Desempenho
 
-Selic (anual, nominal): taxa usada como retorno da perna conservadora e como taxa de aposentadoria na perpetuidade.
+- `n_sims`: 2000–5000 é suficiente.
+- `block_size`: 3–6 meses.
+- Reduza `n_sims` para horizontes longos (30–40 anos).
 
-Glide path (RV inicial/final): controla o risco ao longo do tempo.
+---
 
-Contribuições: % do salário.
+## ⚠️ Limitações
 
-Curva salarial: g0 (início), meia-vida (anos) e piso.
+- Tudo em **termos nominais** (sem inflação real).  
+- Sem impostos, taxas ou custos de transação.  
+- Imóvel sem valorização.  
+- Sem rebalanceamentos fora da regra mensal.  
 
-Habitação:
+---
 
-À vista: preço.
+## 🧮 FAQ
 
-Financiada: loan_pct, spread sobre Selic, prazo em anos.
+**Q:** Por que algumas simulações ainda têm parcelas no último mês?  
+**A:** Porque o financiamento começou tarde; o *balloon* resolve isso no cálculo do patrimônio final.
 
-Simulações: número de cenários (n_sims) e tamanho do bloco no MBB.
+**Q:** O que o fan chart mostra?  
+**A:** A dispersão do valor do portfólio ao longo do tempo — p5 a p95 e mediana.
 
-Saídas e gráficos
+**Q:** Por que a meta usa perpetuidade?  
+**A:** Porque o objetivo é **viver dos juros**, não consumir o principal.
 
-Visão Geral
+---
 
-Métricas: Mediana/Média/P5–P95 e Prob(≥ meta).
+## 📜 Licença
 
-Fan chart do portfólio.
+MIT (recomendado).
 
-Texto com glide path e parâmetros de meta (perpetuidade).
+---
 
-Distribuições
+## 🏁 Citação
 
-Histograma do valor final.
-
-ECDF com linha da meta e probabilidade (P(≥ meta)).
-
-Estatísticas chave com formatação BR e faixa de cor por probabilidade.
-
-Premissas
-
-Médias e desvios do Ibovespa (mensal e anualizado).
-
-Selic, glide path e parâmetros da curva salarial.
-
-Habitação
-
-Financiada: parcela estimada, nº de parcelas, juros totais, tabela de amortização (download CSV) e % de simulações com parcela ativa por mês.
-
-À vista: probabilidade acumulada de compra (CDF).
-
-Dados
-
-Série de retornos usada, parâmetros e meta.
-
-Interpretação da meta
-
-Perpetuidade nominal (padrão): o app calcula o capital para pagar a renda mensal nominal indefinidamente, sem consumir principal, com base na taxa Selic definida.
-Ex.: com Selic de 12% a.a. → r_m = (1+0,12)^(1/12)-1 ≈ 0,9489%/mês.
-Para renda de R$ 30.000/mês: PV ≈ 30.000 / 0,009489 ≈ R$ 3,16 milhões.
-
-Se desejar trabalhar em termos reais (descontando inflação), seria preciso reintroduzir sliders de taxa real e crescimento real dos pagamentos — não habilitado nesta versão.
-
-Desempenho
-
-Comece com n_sims entre 2.000 e 5.000.
-
-Aumente o tamanho do bloco do MBB (3–6) para preservar mais dependência, mas note que isso pode aumentar a variância dos cenários.
-
-Para horizontes longos (300–480 meses), considere reduzir n_sims.
-
-Limitações e suposições
-
-Taxas nominais fixas ao longo do horizonte.
-
-Sem impostos, taxas, fricções ou aportes extraordinários além da regra definida.
-
-Sem aluguel / valorização do imóvel — o foco é no fluxo de caixa (entrada, prestação, balloon).
-
-Compra financiada considera parcela constante PRICE com taxa fixa (Selic + spread como proxy).
-
-Perpetuidade nominal: não há ajuste explícito por inflação (meta e retornos são nominais).
-
-FAQ
-
-Q: Por que a probabilidade de compra à vista pode ser baixa mesmo com crescimento do portfólio?
-A: Porque depende do primeiro mês em que o portfólio cruza o preço total do imóvel. Em horizontes curtos ou preços altos, parte dos cenários pode não atingir o valor.
-
-Q: Por que algumas simulações ainda têm parcelas no último mês?
-A: Porque a compra financiada pode ocorrer tardiamente; nesses casos, o app aplica o balloon (desconta o saldo devedor do patrimônio final) para comparar cenários de forma justa.
-
-Q: O fan chart usa média/percentis entre simulações?
-A: Sim — por mês, calculamos p5, p25, p50, p75, p95 e a média do valor de portfólio.
-
-Solução de problemas
-
-CSV inválido: verifique nomes de colunas (Date/Data e Close/Adj Close/etc.).
-
-Rendimentos “vazios”: confira se há pelo menos 12 meses de dados após a limpeza.
-
-Execução lenta: reduza n_sims ou o horizonte, desative gráficos auxiliares, feche outras abas.
-
-Extensões futuras (ideias)
-
-Meta real (inflação explícita) e pagamentos indexados.
-
-Custos de transação, taxas e impostos.
-
-Renda variável além do IBOV (ex.: MSCI ACWI, small caps, etc.).
-
-Stress testing e análise de sensibilidade interativa.
-
-Considerar valor do imóvel como ativo (liquidez baixa) e cenários de venda.
-
-Licença
-
-Defina a licença do projeto (ex.: MIT).
-
-Agradecimentos
-
-Comunidade Streamlit e Altair.
-
-Usuários que contribuíram com feedback para ajustes de lógica de financiamento e visualizações.
+> “Simulador de Aposentadoria (Streamlit). Monte Carlo com MBB, glide path, curva salarial decrescente e módulo habitacional com balloon. Meta nominal de perpetuidade (juros).”
