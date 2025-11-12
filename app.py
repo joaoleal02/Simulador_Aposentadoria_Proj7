@@ -135,33 +135,52 @@ def simulate_portfolio(
     loan_pct: float = 0.8,
     loan_spread: float = 0.03,
     loan_years: int = 30,
+    precomputed_eq_rets: Optional[np.ndarray] = None,  # <<< NOVO
 ) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
 
     rng = np.random.default_rng(seed)
 
+    # Taxa RF em termos reais (a.a. -> a.m.)
     rf_a_real = nominal_to_real_rate(selic_annual_nominal, inflation_annual)
     rf_m_real = annual_to_monthly_rate(rf_a_real)
 
+    # Retornos de RV em termos reais
     eq_monthly_real = np.array(ibov_monthly_returns_real, dtype=float)
     if eq_monthly_real.size == 0:
         raise ValueError("Lista de retornos mensais do Ibovespa está vazia.")
 
-    eq_rets = mbb_generate(months=months, n_sims=n_sims, monthly_returns=eq_monthly_real, block_size=block_size, seed=seed)
+    # Amostra única de retornos para TODAS as curvas (ou use a fornecida)
+    if precomputed_eq_rets is not None:
+        eq_rets = np.asarray(precomputed_eq_rets, dtype=float)
+        if eq_rets.shape != (months, n_sims):
+            raise ValueError("precomputed_eq_rets deve ter shape (months, n_sims).")
+    else:
+        eq_rets = mbb_generate(
+            months=months,
+            n_sims=n_sims,
+            monthly_returns=eq_monthly_real,
+            block_size=block_size,
+            seed=seed,
+        )
 
+    # Glide path (0..1) para RV
     gp = np.clip(np.asarray(eq_share_path, dtype=float), 0.0, 1.0)
     if gp.shape[0] != months:
         raise ValueError("eq_share_path deve ter comprimento igual a 'months'.")
     rf_gp = 1.0 - gp
 
+    # Alocações iniciais
     total0  = float(initial_investment_real)
     rf_hold = np.full(n_sims, rf_gp[0] * total0, dtype=float)
     eq_hold = np.full(n_sims, gp[0]   * total0, dtype=float)
 
+    # Matrizes de trilha
     paths         = np.zeros((months, n_sims), dtype=float)
     contribs      = np.zeros((months, n_sims), dtype=float)
     mortgage_pays = np.zeros((months, n_sims), dtype=float)
     house_withdraw= np.zeros((months, n_sims), dtype=float)
 
+    # Estado de habitação
     purchased  = np.zeros(n_sims, dtype=bool)
     purchase_m = np.full(n_sims, -1, dtype=int)
 
@@ -179,7 +198,8 @@ def simulate_portfolio(
             loan_a_real = nominal_to_real_rate(annual_rate_nominal, inflation_annual)
             loan_m_real = annual_to_monthly_rate(loan_a_real)
             n_pay       = max(1, int(loan_years * 12))
-            pmt_real    = principal * loan_m_real / (1 - (1 + loan_m_real) ** (-n_pay)) if loan_m_real > 0 else principal / n_pay
+            pmt_real    = (principal * loan_m_real / (1 - (1 + loan_m_real) ** (-n_pay))
+                           if loan_m_real > 0 else principal / n_pay)
     else:
         dp = principal = loan_m_real = 0.0
         n_pay = 0
@@ -204,6 +224,7 @@ def simulate_portfolio(
         house_stats["juros_totais_por_contrato"] = float(amort["juros"].sum())
 
     for t in range(months):
+        # Compra de casa (avista) quando tiver caixa
         if enable_house and house_price > 0:
             current_total = rf_hold + eq_hold
             mask = (~purchased) & ((current_total >= dp) if dp > 0 else True)
@@ -219,9 +240,11 @@ def simulate_portfolio(
                 purchased[mask] = True
                 purchase_m[mask] = t
 
+        # Contribuição
         base_contr = contrib_pct * salary_path_real[t]
         contr_vec  = np.full(n_sims, base_contr, dtype=float)
 
+        # Pagamento da dívida imobiliária (se houver)
         if enable_house and house_price > 0 and house_mode == "divida" and pmt_real > 0:
             active = purchased
             if np.any(active):
@@ -232,15 +255,16 @@ def simulate_portfolio(
                 shortfall = np.maximum(current_pays - contr_vec, 0.0)
                 if np.any(shortfall > 0):
                     rf_avail = np.maximum(rf_hold, 0.0)
-                    rf_take = np.minimum(rf_avail, shortfall)
+                    rf_take  = np.minimum(rf_avail, shortfall)
                     rf_hold -= rf_take
                     rem = shortfall - rf_take
 
                     eq_avail = np.maximum(eq_hold, 0.0)
-                    eq_take = np.minimum(eq_avail, rem)
+                    eq_take  = np.minimum(eq_avail, rem)
                     eq_hold -= eq_take
                     rem2 = rem - eq_take
 
+                    # último recurso: RF pode ficar negativa (dívida)
                     rf_hold -= rem2
 
                 contr_vec = np.maximum(0.0, contr_vec - current_pays)
@@ -252,6 +276,7 @@ def simulate_portfolio(
 
         contribs[t, :] = contr_vec
 
+        # Rebalanceamento com proteção para riqueza negativa
         if rebalance_monthly:
             total_before = rf_hold + eq_hold + contr_vec
             pos = total_before >= 0
@@ -263,11 +288,13 @@ def simulate_portfolio(
             rf_hold += rf_gp[t] * contr_vec
             eq_hold += gp[t]   * contr_vec
 
+        # Aplicar retornos
         rf_hold *= (1 + rf_m_real)
         eq_hold *= (1 + eq_rets[t, :])
 
         paths[t, :] = rf_hold + eq_hold
 
+    # Saídas
     month_index = pd.RangeIndex(1, months + 1, name="mês")
     paths_df = pd.DataFrame(paths, index=month_index)
     components_df = pd.DataFrame({
@@ -285,6 +312,7 @@ def simulate_portfolio(
         house_stats["mediana_mes_compra"] = int(np.median(purchase_m[comprou])) + 1 if np.any(comprou) else None
 
     return paths_df, components_df, house_stats
+
 
 
 def amortization_table(principal: float, monthly_rate: float, n_pay: int) -> pd.DataFrame:
@@ -426,8 +454,6 @@ def main():
         seed_opt= st.text_input("Seed aleatória (opcional)", value="")
         seed    = int(seed_opt) if seed_opt.strip().isdigit() else None
 
-        opt_runs = st.slider("Rodadas de otimização (média)", 1, 15, 1)
-
         advanced = st.expander("Opções avançadas")
         with advanced:
             rebalance  = st.toggle("Rebalancear mensalmente", value=True)
@@ -488,73 +514,63 @@ def main():
     )
 
     if run_btn:
-        with st.spinner("Otimizando alocação por idade..."):
+        # Amostra única de retornos (fixa para todos os candidatos a,b)
+        eq_rets_shared = mbb_generate(
+            months=months,
+            n_sims=n_sims,
+            monthly_returns=np.array(ibov_monthly_returns_real, dtype=float),
+            block_size=block_size,
+            seed=seed,
+        )
+
+        with st.spinner("Calculando melhor alocação..."):
             a_candidates = np.arange(age0 + years, min(age0 + years + 15, 90) + 1, 2)
             b_candidates = np.arange(age0, max(age0, age0 + years - 5) + 1, 2)
-            n_sims_opt = max(500, min(2000, n_sims // 5))
 
-            best_pairs = []
-            eq_paths_runs = []
+            best_prob = -1.0
+            best_pair: Optional[Tuple[float, float]] = None
+            best_gp: Optional[np.ndarray] = None
+            best_paths_df = best_components_df = best_house_info = None
 
-            for run in range(opt_runs):
-                best_prob = -1.0
-                best_pair = None
-                best_gp   = None
-                # semente deslocada por run para diversificar amostras mantendo reprodutibilidade quando seed é fornecida
-                seed_local = (None if seed is None else int(seed + 7919 * run))
-                for a in a_candidates:
-                    for b in b_candidates:
-                        if a - b <= 5:
-                            continue
-                        gp_try = glide_path_by_ab(age0, months, a=float(a), b=float(b))
-                        p_df, _, _ = simulate_portfolio(
-                            months=months,
-                            n_sims=n_sims_opt,
-                            selic_annual_nominal=selic_annual_nom,
-                            inflation_annual=INFLATION_ANNUAL,
-                            ibov_monthly_returns_real=ibov_monthly_returns_real,
-                            salary_path_real=salary_path,
-                            contrib_pct=contrib_pct,
-                            initial_investment_real=0.0,
-                            eq_share_path=gp_try,
-                            rebalance_monthly=True,
-                            seed=seed_local,
-                            block_size=block_size,
-                            enable_house=False,
-                        )
-                        final_vals_try = p_df.iloc[-1, :].to_numpy(dtype=float)
-                        prob_hit = float(np.mean(final_vals_try >= required_pv))
-                        if (prob_hit > best_prob) or (math.isclose(prob_hit, best_prob) and (best_pair is None or a < best_pair[0])):
-                            best_prob = prob_hit
-                            best_pair = (float(a), float(b))
-                            best_gp   = gp_try
-                best_pairs.append(best_pair)
-                eq_paths_runs.append(best_gp)
+            for a in a_candidates:
+                for b in b_candidates:
+                    if a - b <= 5:
+                        continue
 
-            if opt_runs > 1:
-                eq_path_opt = np.mean(np.vstack(eq_paths_runs), axis=0)
-                chosen_a_b  = (float(np.mean([p[0] for p in best_pairs])), float(np.mean([p[1] for p in best_pairs])))
-            else:
-                eq_path_opt = eq_paths_runs[0]
-                chosen_a_b  = best_pairs[0]
+                    gp_try = glide_path_by_ab(age0, months, a=float(a), b=float(b))
 
-        with st.spinner("Simulando..."):
-            paths_df, components_df, house_info = simulate_portfolio(
-                months=months,
-                n_sims=n_sims,
-                selic_annual_nominal=selic_annual_nom,
-                inflation_annual=INFLATION_ANNUAL,
-                ibov_monthly_returns_real=ibov_monthly_returns_real,
-                salary_path_real=salary_path,
-                contrib_pct=contrib_pct,
-                initial_investment_real=0.0 + 0.0 + 0.0 + 0.0 + 0.0 + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + 0.0 + (0.0) + 0.0 + 0.0 + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + 0.0 + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0) + (0.0) + 0.0 + (0.0),
-                eq_share_path=eq_path_opt,
-                rebalance_monthly=rebalance,
-                seed=seed,
-                block_size=block_size,
-                enable_house=enable_house,
-                **house_params,
-            )
+                    p_df, comp_df, h_info = simulate_portfolio(
+                        months=months,
+                        n_sims=n_sims,
+                        selic_annual_nominal=selic_annual_nom,
+                        inflation_annual=INFLATION_ANNUAL,
+                        ibov_monthly_returns_real=ibov_monthly_returns_real,
+                        salary_path_real=salary_path,
+                        contrib_pct=contrib_pct,
+                        initial_investment_real=initial_wealth,  # usa patrimônio inicial informado
+                        eq_share_path=gp_try,
+                        rebalance_monthly=rebalance,
+                        seed=seed,  # irrelevante para os retornos (já pré-computados)
+                        block_size=block_size,
+                        enable_house=enable_house,
+                        precomputed_eq_rets=eq_rets_shared,  # <<< fixa a amostra
+                        **house_params,
+                    )
+
+                    final_vals_try = p_df.iloc[-1, :].to_numpy(dtype=float)
+                    prob_hit = float(np.mean(final_vals_try >= required_pv))
+
+                    if (prob_hit > best_prob) or (
+                            math.isclose(prob_hit, best_prob) and (best_pair is None or a < best_pair[0])):
+                        best_prob = prob_hit
+                        best_pair = (float(a), float(b))
+                        best_gp = gp_try
+                        best_paths_df, best_components_df, best_house_info = p_df, comp_df, h_info
+
+            # Resultado ótimo (mesma amostra para todos)
+            eq_path_opt = best_gp
+            chosen_a_b = best_pair
+            paths_df, components_df, house_info = best_paths_df, best_components_df, best_house_info
 
         summary = summarize_simulations(paths_df)
 
@@ -615,7 +631,7 @@ def main():
             )
             st.altair_chart(fan_chart, use_container_width=True)
 
-            st.subheader("Alocação média por idade (ótimos)")
+            st.subheader("Alocação ótima por idade")
             gp_df = pd.DataFrame({
                 "mês": np.arange(1, months + 1),
                 "idade": age0 + np.arange(months) / 12.0,
